@@ -4,11 +4,11 @@
  */
 
 import { motion, AnimatePresence } from "motion/react";
-import { Mic, GraduationCap, Trophy, LayoutDashboard, Database, User, BookOpen, Search, ChevronRight, TrendingUp, CheckCircle2, AlertCircle, FileSpreadsheet, Plus, X, Settings2, Download, ArrowLeft } from "lucide-react";
+import { Mic, GraduationCap, Trophy, LayoutDashboard, Database, User, BookOpen, Search, ChevronRight, TrendingUp, CheckCircle2, AlertCircle, FileSpreadsheet, Plus, X, Settings2, Download, ArrowLeft, Trash2 } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 import * as XLSX from 'xlsx';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, doc, setDoc, getDoc, getDocs, query, where, orderBy, limit, serverTimestamp, Timestamp, onSnapshot } from 'firebase/firestore';
+import { getFirestore, collection, doc, setDoc, getDoc, getDocs, query, where, orderBy, limit, serverTimestamp, Timestamp, onSnapshot, deleteDoc } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
 // Initialize Firebase
@@ -83,42 +83,39 @@ export default function App() {
   const questionCountRef = useRef<number>(5);
   const isActiveRef = useRef(false);
 
-  // Fetch Current Session Status from Firestore
+  // Real-time synchronization for Current Session Entries
   useEffect(() => {
-    const restoreSession = async () => {
-      // If we have a session ID and matching metadata, ensure we have the latest server data
-      if (sessionId && appState === 'ENTRY' && discipline && professor) {
-        try {
-          const q = query(
-            collection(db, "exam_entries"),
-            where("discipline", "==", discipline.trim()),
-            where("professor", "==", professor.trim()),
-            where("sessionId", "==", sessionId)
-          );
-          const querySnapshot = await getDocs(q);
-          const serverMap: Record<string, ExamEntry> = {};
-          querySnapshot.forEach(doc => {
-            const data = doc.data();
-            serverMap[data.studentId] = {
-              studentId: data.studentId,
-              scores: data.scores,
-              total: data.total
-            };
-          });
-          
-          // Merge server data with local data (server wins for conflicts)
-          setExamEntries(prev => {
-            const merged = { ...prev, ...serverMap };
-            examEntriesRef.current = merged;
-            return merged;
-          });
-        } catch (e) {
-          console.error("Error restoring session from server:", e);
-        }
-      }
-    };
-    restoreSession();
-  }, [sessionId, appState]);
+    if (!sessionId || !discipline || !professor) return;
+
+    const q = query(
+      collection(db, "exam_entries"),
+      where("discipline", "==", discipline.trim()),
+      where("professor", "==", professor.trim()),
+      where("sessionId", "==", sessionId)
+    );
+
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const serverMap: Record<string, ExamEntry> = {};
+      querySnapshot.forEach(doc => {
+        const data = doc.data();
+        serverMap[data.studentId] = {
+          studentId: data.studentId,
+          scores: data.scores,
+          total: data.total
+        };
+      });
+
+      setExamEntries(prev => {
+        const merged = { ...prev, ...serverMap };
+        examEntriesRef.current = merged;
+        return merged;
+      });
+    }, (error) => {
+      console.error("Error syncing current session entries:", error);
+    });
+
+    return () => unsubscribe();
+  }, [sessionId, discipline, professor]);
 
   const [syncStatus, setSyncStatus] = useState<'IDLE' | 'SYNCING' | 'ERROR'>('IDLE');
 
@@ -486,6 +483,37 @@ export default function App() {
     }
   };
 
+  const deleteStudentEntry = async (sId: string) => {
+    setIsSaving(true);
+    try {
+      const entryId = `${sId}_${sanitizeId(discipline)}_${sanitizeId(professor)}_${sessionId}`;
+      await deleteDoc(doc(db, "exam_entries", entryId));
+      
+      setExamEntries(prev => {
+        const updated = { ...prev };
+        delete updated[sId];
+        return updated;
+      });
+      
+      if (selectedStudentId === sId) {
+        setSelectedStudentId(null);
+      }
+    } catch (e) {
+      console.error("Error deleting student entry:", e);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const deleteStudent = async (sId: string) => {
+     try {
+       await deleteDoc(doc(db, "students", sId));
+       if (selectedStudentId === sId) setSelectedStudentId(null);
+     } catch (e) {
+       console.error("Error deleting student:", e);
+     }
+  };
+
   const finalizeSession = async () => {
     setIsSaving(true);
     try {
@@ -510,18 +538,18 @@ export default function App() {
   };
 
   const exportToExcel = () => {
-    const sortedRanking = Object.values(examEntries)
-      .map(entry => {
-        const student = students.find(s => s.id === entry.studentId);
+    const sortedRanking = students
+      .map(s => {
+        const entry = examEntries[s.id] || { studentId: s.id, scores: new Array(questionCount).fill(0), total: 0 };
         return {
-          Nome: student?.name || "Desconhecido",
-          Matrícula: student?.registration || "-",
+          Nome: s.name,
+          Matrícula: s.registration || "-",
           ...entry.scores.reduce((acc, score, idx) => ({ ...acc, [`Q${idx+1}`]: score }), {}),
           Total: entry.total,
           Situação: entry.total >= (questionCount * 0.6) ? "APROVADO" : "REPROVADO"
         };
       })
-      .sort((a, b) => b.Total - a.Total);
+      .sort((a, b) => b.Total - a.Total || a.Nome.localeCompare(b.Nome));
 
     if (sortedRanking.length === 0) {
         alert("Nenhum dado para exportar!");
@@ -744,14 +772,28 @@ export default function App() {
 
                   <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col gap-2 pr-2">
                     {students.map(s => (
-                      <button 
-                        key={s.id}
-                        onClick={() => setSelectedStudentId(s.id)}
-                        className={`w-full p-4 rounded-2xl border transition-all flex justify-between items-center group ${selectedStudentId === s.id ? 'bg-indigo-600 border-indigo-500 shadow-lg shadow-indigo-900/20' : 'bg-[#12141A]/50 border-gray-800 hover:border-gray-700'}`}
-                      >
+                        <div 
+                          key={s.id}
+                          onClick={() => setSelectedStudentId(s.id)}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedStudentId(s.id); }}
+                          className={`w-full p-4 rounded-2xl border transition-all flex justify-between items-center group cursor-pointer outline-none focus:ring-2 focus:ring-indigo-500/50 ${selectedStudentId === s.id ? 'bg-indigo-600 border-indigo-500 shadow-lg shadow-indigo-900/20' : 'bg-[#12141A]/50 border-gray-800 hover:border-gray-700'}`}
+                        >
                         <div className="text-left flex-1 min-w-0 pr-2 py-0.5">
                           <div className="flex flex-col gap-1.5">
-                            <p className={`text-xs font-black uppercase truncate ${selectedStudentId === s.id ? 'text-white' : 'text-gray-300'}`}>{s.name}</p>
+                            <div className="flex justify-between items-center group/item">
+                              <p className={`text-xs font-black uppercase truncate ${selectedStudentId === s.id ? 'text-white' : 'text-gray-300'}`}>{s.name}</p>
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (confirm(`Excluir aluno ${s.name}?`)) deleteStudent(s.id);
+                                }}
+                                className="opacity-0 group-hover/item:opacity-100 p-1 text-gray-500 hover:text-red-500 transition-all"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
                             <div className="flex flex-wrap gap-1 overflow-hidden">
                               {allHistoricalScores[s.id]?.map((score, idx) => (
                                 <span key={idx} className={`text-[8px] font-black px-1 rounded ${selectedStudentId === s.id ? 'bg-white/20 text-indigo-100' : 'bg-indigo-500/10 text-indigo-400/60'}`}>
@@ -768,7 +810,7 @@ export default function App() {
                           </div>
                         )}
                         <ChevronRight size={14} className={selectedStudentId === s.id ? 'text-white' : 'text-gray-700'} />
-                      </button>
+                        </div>
                     ))}
                   </div>
                 </div>
@@ -778,21 +820,89 @@ export default function App() {
               <div className="lg:col-span-8 flex flex-col gap-6 h-full">
                 <div className="bg-[#1A1D24] border border-gray-800 rounded-3xl p-6 sm:p-8 flex flex-col gap-6 overflow-y-auto custom-scrollbar shadow-xl relative h-full">
                   {!selectedStudentId ? (
-                    <div className="flex-1 flex flex-col items-center justify-center text-center space-y-8 p-12">
-                      <div className="space-y-4 opacity-50">
-                        <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center text-gray-600 mx-auto">
-                          <User size={32} />
+                    <div className="flex-1 flex flex-col gap-8 h-full">
+                      <div className="flex flex-col items-center justify-center text-center space-y-6 py-8">
+                        <div className="space-y-4 opacity-50">
+                          <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center text-gray-600 mx-auto">
+                            <GraduationCap size={32} />
+                          </div>
+                          <p className="text-sm font-bold text-gray-500 uppercase tracking-widest">Painel de Controle: {discipline}</p>
                         </div>
-                        <p className="text-sm font-bold text-gray-500 uppercase tracking-widest">Selecione um aluno para lançar notas</p>
+                        
+                        {Object.keys(examEntries).length > 0 && (
+                          <button 
+                            onClick={finalizeSession}
+                            className="px-8 py-4 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-2xl shadow-xl shadow-indigo-900/40 transition-all uppercase tracking-widest flex items-center justify-center gap-3"
+                          >
+                            Consolidar e Ver Ranking Completo <Trophy size={18} />
+                          </button>
+                        )}
                       </div>
-                      
+
                       {Object.keys(examEntries).length > 0 && (
-                        <button 
-                          onClick={finalizeSession}
-                          className="px-12 py-5 bg-indigo-600 hover:bg-indigo-700 text-white font-black rounded-2xl shadow-xl shadow-indigo-900/40 transition-all uppercase tracking-widest flex items-center justify-center gap-3"
-                        >
-                          Encerrar Prova e Ver Ranking <TrendingUp size={20} />
-                        </button>
+                        <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+                          <div className="flex items-center justify-between">
+                            <h4 className="text-xs font-black uppercase text-indigo-400 tracking-widest flex items-center gap-2">
+                               <Trophy size={14} /> Classificação Atual (Parcial)
+                            </h4>
+                            <span className="text-[10px] font-bold text-gray-600 uppercase tracking-widest">{Object.keys(examEntries).length} Notas Lançadas</span>
+                          </div>
+                          
+                          <div className="flex-1 overflow-y-auto custom-scrollbar border border-gray-800/50 rounded-2xl bg-[#12141A]/30">
+                            <table className="w-full text-left border-collapse">
+                              <thead>
+                                <tr className="bg-[#12141A]">
+                                  <th className="p-4 text-[10px] font-black text-gray-600 uppercase tracking-widest">Posto</th>
+                                  <th className="p-4 text-[10px] font-black text-gray-600 uppercase tracking-widest">Estudante</th>
+                                  <th className="p-4 text-[10px] font-black text-gray-600 uppercase tracking-widest text-center">Nota</th>
+                                  <th className="p-4 text-[10px] font-black text-gray-600 uppercase tracking-widest text-right">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {students
+                                  .map(s => ({
+                                    ...s,
+                                    score: examEntries[s.id]?.total || 0,
+                                    isGraded: !!examEntries[s.id]
+                                  }))
+                                  .sort((a, b) => {
+                                    if (b.score !== a.score) return b.score - a.score;
+                                    return a.name.localeCompare(b.name);
+                                  })
+                                  .map((scoredStudent, idx) => {
+                                    const isApproved = scoredStudent.score >= (questionCount * 0.6);
+                                    return (
+                                      <tr key={scoredStudent.id} className={`border-t border-gray-800/50 hover:bg-white/5 transition-colors ${!scoredStudent.isGraded ? 'opacity-40' : ''}`}>
+                                        <td className="p-4">
+                                          <div className={`w-6 h-6 flex items-center justify-center rounded-lg font-black text-[10px] ${scoredStudent.isGraded ? (idx === 0 ? 'bg-amber-500/20 text-amber-500' : idx === 1 ? 'bg-gray-400/20 text-gray-400' : idx === 2 ? 'bg-amber-700/20 text-amber-700' : 'bg-gray-800 text-gray-600') : 'bg-transparent text-gray-800'}`}>
+                                            {idx + 1}
+                                          </div>
+                                        </td>
+                                        <td className="p-4">
+                                          <p className="text-xs font-black text-gray-300 uppercase truncate max-w-[150px]">{scoredStudent.name}</p>
+                                          <p className="text-[9px] text-gray-600 font-bold uppercase">{scoredStudent.registration || "—"}</p>
+                                        </td>
+                                        <td className="p-4 text-center">
+                                          <span className={`text-sm font-black italic ${scoredStudent.isGraded ? 'text-white' : 'text-gray-700'}`}>
+                                            {scoredStudent.score.toFixed(2)}
+                                          </span>
+                                        </td>
+                                        <td className="p-4 text-right">
+                                          {scoredStudent.isGraded ? (
+                                            <div className={`inline-flex px-2 py-1 rounded-md text-[8px] font-black uppercase tracking-widest ${isApproved ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`}>
+                                              {isApproved ? 'OK' : 'REP'}
+                                            </div>
+                                          ) : (
+                                            <span className="text-[8px] font-black text-gray-800 uppercase tracking-widest italic">Pendente</span>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
                       )}
                     </div>
                   ) : (
@@ -809,9 +919,22 @@ export default function App() {
                             <p className="text-[10px] text-indigo-400 font-black uppercase tracking-widest truncate">Matrícula: {students.find(s => s.id === selectedStudentId)?.registration || "—"}</p>
                           </div>
                         </div>
-                        <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                          <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest whitespace-nowrap">Nota Atual</p>
-                          <p className="text-4xl font-black text-white italic">{(examEntries[selectedStudentId]?.total || 0).toFixed(2)}</p>
+                        <div className="flex items-center gap-4">
+                          <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                            <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest whitespace-nowrap">Nota Atual</p>
+                            <p className="text-4xl font-black text-white italic">{(examEntries[selectedStudentId]?.total || 0).toFixed(2)}</p>
+                          </div>
+                          {examEntries[selectedStudentId] && (
+                            <button 
+                              onClick={() => {
+                                if (confirm("Deseja apagar o lançamento atual deste aluno?")) deleteStudentEntry(selectedStudentId);
+                              }}
+                              className="p-3 bg-red-500/10 text-red-500 hover:bg-red-500/20 rounded-xl transition-all"
+                              title="Excluir Lançamento"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          )}
                         </div>
                       </div>
 
@@ -956,18 +1079,21 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {Object.values(examEntries)
-                        .sort((a, b) => b.total - a.total)
+                      {students
+                        .map(s => {
+                          const entry = examEntries[s.id] || { studentId: s.id, scores: new Array(questionCount).fill(0), total: 0 };
+                          return { ...entry, studentName: s.name, registration: s.registration };
+                        })
+                        .sort((a, b) => b.total - a.total || (a.studentName || "").localeCompare(b.studentName || ""))
                         .map((entry, idx) => {
-                          const student = students.find(s => s.id === entry.studentId);
                           const isApproved = entry.total >= (questionCount * 0.6);
                           return (
                             <tr key={idx} className="border-b border-gray-800/50 hover:bg-[#12141A]/50 transition-colors group">
                               <td className="p-6 text-2xl font-black text-gray-800 group-hover:text-indigo-500/20 italic font-mono transition-colors">
                                 {(idx + 1).toString().padStart(2, '0')}
                               </td>
-                              <td className="p-6 font-black uppercase text-gray-300 whitespace-nowrap">{student?.name}</td>
-                              <td className="p-6 text-xs text-gray-600 font-mono whitespace-nowrap">{student?.registration || "—"}</td>
+                              <td className="p-6 font-black uppercase text-gray-300 whitespace-nowrap">{entry.studentName}</td>
+                              <td className="p-6 text-xs text-gray-600 font-mono whitespace-nowrap">{entry.registration || "—"}</td>
                               
                               {/* Dynamic Question Scores */}
                               {Array.from({ length: questionCount }).map((_, qIdx) => (
