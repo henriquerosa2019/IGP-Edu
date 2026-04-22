@@ -1,0 +1,52 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 256 && id.size() > 0;
+    }
+
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    function isValidStudent(data) {
+      return data.keys().hasAll(['id', 'name', 'registration']) &&
+             data.keys().size() == 3 &&
+             data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 200 &&
+             data.registration is string && data.registration.size() <= 50;
+    }
+
+    function isValidExamEntry(data) {
+      return data.keys().hasAll(['studentId', 'discipline', 'professor', 'scores', 'total', 'updatedAt', 'sessionId']) &&
+             data.keys().size() == 7 &&
+             data.studentId is string && data.studentId.size() <= 128 &&
+             data.discipline is string && data.discipline.size() <= 200 &&
+             data.professor is string && data.professor.size() <= 200 &&
+             data.scores is list && data.scores.size() <= 50 &&
+             data.total is number &&
+             data.sessionId is string &&
+             data.updatedAt is timestamp;
+    }
+
+    match /students/{studentId} {
+      allow get: if true;
+      allow list: if true;
+      allow create: if isValidId(studentId) && isValidStudent(incoming());
+      allow update: if isValidId(studentId) && isValidStudent(incoming()) && 
+                    incoming().id == existing().id;
+    }
+
+    match /exam_entries/{entryId} {
+      allow get: if true;
+      allow list: if true;
+      allow create: if isValidId(entryId) && isValidExamEntry(incoming());
+      allow update: if isValidId(entryId) && isValidExamEntry(incoming()) &&
+                    incoming().studentId == existing().studentId;
+    }
+  }
+}

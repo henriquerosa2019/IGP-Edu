@@ -1,0 +1,40 @@
+{
+  "entities": {
+    "Student": {
+      "title": "Student",
+      "description": "Student registration data.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "registration": { "type": "string" }
+      },
+      "required": ["id", "name", "registration"]
+    },
+    "ExamEntry": {
+      "title": "Exam Entry",
+      "description": "Individual student grades for an exam session.",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string" },
+        "discipline": { "type": "string" },
+        "professor": { "type": "string" },
+        "scores": { "type": "array" },
+        "total": { "type": "number" },
+        "sessionId": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["studentId", "discipline", "professor", "scores", "total", "updatedAt", "sessionId"]
+    }
+  },
+  "firestore": {
+    "/students/{studentId}": {
+      "schema": "Student",
+      "description": "Global student database."
+    },
+    "/exam_entries/{entryId}": {
+      "schema": "ExamEntry",
+      "description": "Stores all historical exam grades for all students."
+    }
+  }
+}

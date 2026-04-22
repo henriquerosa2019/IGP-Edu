@@ -1,0 +1,8 @@
+{
+  "name": "IGP EDU V2.0",
+  "description": "Professional academic management system with voice-controlled grade entry and real-time student ranking.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
